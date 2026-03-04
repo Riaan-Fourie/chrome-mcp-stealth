@@ -13,10 +13,23 @@ let defaultContext = null;
 let currentPage = null;
 
 // ============================================================
-// MODE: "fast" (default) or "stealth"
+// MODE: "stealth" (default) or "fast"
 // ============================================================
-let currentMode = "fast";
+let currentMode = "stealth";
 let stealthPatchedPages = new WeakSet();
+
+// Domains that MUST always run in stealth mode — fast mode is blocked.
+const STEALTH_ONLY_DOMAINS = new Set([
+  "linkedin.com",
+  "www.linkedin.com",
+]);
+
+function isForcedStealth(url) {
+  try {
+    const hostname = new URL(url).hostname;
+    return [...STEALTH_ONLY_DOMAINS].some((d) => hostname === d || hostname.endsWith("." + d));
+  } catch { return false; }
+}
 
 // ============================================================
 // SECURITY: Prompt Injection Defense Layer
@@ -342,7 +355,7 @@ function getAccessibilityTree(snapshot, depth = 0) {
 const tools = [
   {
     name: "chrome_set_mode",
-    description: 'Switch between "stealth" mode (human-like delays, Bezier mouse, anti-detection) and "fast" mode (instant actions, no delays).',
+    description: 'Switch between "stealth" mode (default, human-like delays, Bezier mouse, anti-detection) and "fast" mode (instant actions, no delays). Some domains (e.g. LinkedIn) enforce stealth and block fast mode.',
     inputSchema: { type: "object", properties: { mode: { type: "string", enum: ["stealth", "fast"], description: '"stealth" = human-like. "fast" = instant.' } }, required: ["mode"] },
   },
   {
@@ -407,6 +420,10 @@ async function handleTool(name, args) {
 
   switch (name) {
     case "chrome_set_mode": {
+      if (args.mode === "fast" && currentPage) {
+        const url = currentPage.url();
+        if (isForcedStealth(url)) return `BLOCKED: Fast mode not allowed on ${new URL(url).hostname}. This domain requires stealth mode.`;
+      }
       const oldMode = currentMode;
       currentMode = args.mode;
       let msg = `Mode: ${oldMode} -> ${currentMode}`;
@@ -416,9 +433,14 @@ async function handleTool(name, args) {
     case "chrome_navigate": {
       const domainCheck = checkDomain(args.url);
       if (domainCheck.blocked) return `BLOCKED: Navigation to ${domainCheck.domain} not allowed.`;
+      // Auto-enforce stealth on stealth-only domains
+      if (isForcedStealth(args.url) && currentMode !== "stealth") {
+        currentMode = "stealth";
+      }
       await currentPage.goto(args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
-      if (isStealth) { stealthPatchedPages.delete(currentPage); await applyStealthPatches(currentPage); await sleep(gaussianDelay(2000, 800, 800, 4000)); }
+      if (currentMode === "stealth") { stealthPatchedPages.delete(currentPage); await applyStealthPatches(currentPage); await sleep(gaussianDelay(2000, 800, 800, 4000)); }
       let result = `Navigated to ${currentPage.url()}\nTitle: ${await currentPage.title()}\nMode: ${currentMode}`;
+      if (isForcedStealth(args.url)) result += `\n!! STEALTH ENFORCED: ${domainCheck.domain} is a stealth-only domain.`;
       if (domainCheck.sensitive) result += `\n!! SENSITIVE DOMAIN: ${domainCheck.domain}`;
       return result;
     }
