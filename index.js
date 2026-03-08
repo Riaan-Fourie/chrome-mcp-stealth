@@ -15,10 +15,12 @@ let currentPage = null;
 // ============================================================
 // MODE: "stealth" (default) or "fast"
 // ============================================================
-let currentMode = "stealth";
+let currentMode = "fast";
 let stealthPatchedPages = new WeakSet();
 
 // Domains that MUST always run in stealth mode — fast mode is blocked.
+// Multi-layer enforcement: checked on navigate, mode switch, every interaction,
+// tab switch, and post-redirect. This CANNOT be bypassed.
 const STEALTH_ONLY_DOMAINS = new Set([
   "linkedin.com",
   "www.linkedin.com",
@@ -29,6 +31,21 @@ function isForcedStealth(url) {
     const hostname = new URL(url).hostname;
     return [...STEALTH_ONLY_DOMAINS].some((d) => hostname === d || hostname.endsWith("." + d));
   } catch { return false; }
+}
+
+// LAYER 3: Enforce stealth on every interaction tool call.
+// Called at the top of click, type, scroll, evaluate, snapshot, screenshot.
+// If the current page is on a stealth-only domain, force stealth mode
+// regardless of what currentMode says. This catches edge cases where
+// mode was somehow left on fast (redirects, tab switches, bugs).
+function enforceStealthIfNeeded() {
+  if (!currentPage) return;
+  try {
+    const url = currentPage.url();
+    if (isForcedStealth(url) && currentMode !== "stealth") {
+      currentMode = "stealth";
+    }
+  } catch { /* page might be closed */ }
 }
 
 // ============================================================
@@ -355,7 +372,7 @@ function getAccessibilityTree(snapshot, depth = 0) {
 const tools = [
   {
     name: "chrome_set_mode",
-    description: 'Switch between "stealth" mode (default, human-like delays, Bezier mouse, anti-detection) and "fast" mode (instant actions, no delays). Some domains (e.g. LinkedIn) enforce stealth and block fast mode.',
+    description: 'Switch between "fast" mode (default, instant actions, no delays) and "stealth" mode (human-like delays, Bezier mouse, anti-detection). LinkedIn auto-enforces stealth and blocks fast mode.',
     inputSchema: { type: "object", properties: { mode: { type: "string", enum: ["stealth", "fast"], description: '"stealth" = human-like. "fast" = instant.' } }, required: ["mode"] },
   },
   {
@@ -416,6 +433,9 @@ const tools = [
 
 async function handleTool(name, args) {
   await ensureConnected();
+
+  // LAYER 3: Check stealth enforcement on EVERY tool call
+  enforceStealthIfNeeded();
   const isStealth = currentMode === "stealth";
 
   switch (name) {
@@ -433,14 +453,22 @@ async function handleTool(name, args) {
     case "chrome_navigate": {
       const domainCheck = checkDomain(args.url);
       if (domainCheck.blocked) return `BLOCKED: Navigation to ${domainCheck.domain} not allowed.`;
-      // Auto-enforce stealth on stealth-only domains
+      // Auto-enforce stealth on stealth-only domains, auto-restore fast when leaving
       if (isForcedStealth(args.url) && currentMode !== "stealth") {
         currentMode = "stealth";
+      } else if (!isForcedStealth(args.url) && currentMode === "stealth" && isForcedStealth(currentPage.url())) {
+        currentMode = "fast";
       }
       await currentPage.goto(args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      // LAYER 4: Post-redirect stealth detection — check the ACTUAL URL after
+      // load, not just the requested URL. Catches redirects to LinkedIn.
+      const actualUrl = currentPage.url();
+      if (isForcedStealth(actualUrl) && currentMode !== "stealth") {
+        currentMode = "stealth";
+      }
       if (currentMode === "stealth") { stealthPatchedPages.delete(currentPage); await applyStealthPatches(currentPage); await sleep(gaussianDelay(2000, 800, 800, 4000)); }
-      let result = `Navigated to ${currentPage.url()}\nTitle: ${await currentPage.title()}\nMode: ${currentMode}`;
-      if (isForcedStealth(args.url)) result += `\n!! STEALTH ENFORCED: ${domainCheck.domain} is a stealth-only domain.`;
+      let result = `Navigated to ${actualUrl}\nTitle: ${await currentPage.title()}\nMode: ${currentMode}`;
+      if (isForcedStealth(actualUrl)) result += `\n!! STEALTH ENFORCED: ${checkDomain(actualUrl).domain} is a stealth-only domain.`;
       if (domainCheck.sensitive) result += `\n!! SENSITIVE DOMAIN: ${domainCheck.domain}`;
       return result;
     }
@@ -467,7 +495,7 @@ async function handleTool(name, args) {
     case "chrome_click": {
       const domainCheck = checkDomain(currentPage.url());
       if (isStealth) await humanClick(currentPage, args.selector);
-      else { await currentPage.click(args.selector, { timeout: 5000 }); await currentPage.waitForTimeout(500); }
+      else { await currentPage.click(args.selector, { timeout: 5000 }); }
       let result = `Clicked: ${args.selector}\nURL: ${currentPage.url()}\nMode: ${currentMode}`;
       if (domainCheck.sensitive) result += `\n!! SENSITIVE DOMAIN: ${domainCheck.domain}`;
       return result;
@@ -479,9 +507,13 @@ async function handleTool(name, args) {
         await humanType(currentPage, args.text);
         if (args.pressEnter) { await sleep(gaussianDelay(300, 100, 150, 600)); await currentPage.keyboard.press("Enter"); await sleep(gaussianDelay(1000, 300, 500, 2000)); }
       } else {
-        if (args.selector) await currentPage.click(args.selector, { timeout: 5000 });
-        await currentPage.keyboard.type(args.text, { delay: 50 });
-        if (args.pressEnter) { await currentPage.keyboard.press("Enter"); await currentPage.waitForTimeout(1000); }
+        if (args.selector) {
+          await currentPage.fill(args.selector, args.text);
+        } else {
+          // No selector — type into whatever is focused, but use instant delay
+          await currentPage.keyboard.type(args.text, { delay: 0 });
+        }
+        if (args.pressEnter) { await currentPage.keyboard.press("Enter"); }
       }
       return `Typed: "${args.text.slice(0, 50)}${args.text.length > 50 ? "..." : ""}"${args.pressEnter ? " + Enter" : ""}\nMode: ${currentMode}`;
     }
@@ -490,14 +522,32 @@ async function handleTool(name, args) {
       switch (args.action) {
         case "list": return pages.map((p, i) => `${i === pages.indexOf(currentPage) ? "-> " : "   "}[${i}] ${p.url()}`).join("\n");
         case "select":
-          if (args.index >= 0 && args.index < pages.length) { currentPage = pages[args.index]; await currentPage.bringToFront(); if (isStealth) await applyStealthPatches(currentPage); return `Switched to tab ${args.index}`; }
+          if (args.index >= 0 && args.index < pages.length) {
+            currentPage = pages[args.index];
+            await currentPage.bringToFront();
+            // LAYER 5: Enforce stealth when switching to a LinkedIn tab
+            if (isForcedStealth(currentPage.url())) { currentMode = "stealth"; }
+            if (currentMode === "stealth") await applyStealthPatches(currentPage);
+            let selectMsg = `Switched to tab ${args.index}`;
+            if (isForcedStealth(currentPage.url())) selectMsg += `\n!! STEALTH ENFORCED: switching to stealth-only domain`;
+            return selectMsg;
+          }
           return "Invalid tab index";
         case "new": {
           if (args.url) { const dc = checkDomain(args.url); if (dc.blocked) return `BLOCKED: ${dc.domain}`; }
           const newPage = await defaultContext.newPage();
-          if (args.url) await newPage.goto(args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
-          currentPage = newPage; if (isStealth) await applyStealthPatches(currentPage);
-          return `Opened new tab: ${currentPage.url()}`;
+          if (args.url) {
+            // LAYER 5b: Enforce stealth before navigating new tab to LinkedIn
+            if (isForcedStealth(args.url)) currentMode = "stealth";
+            await newPage.goto(args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+            // Post-redirect check on new tab too
+            if (isForcedStealth(newPage.url())) currentMode = "stealth";
+          }
+          currentPage = newPage;
+          if (currentMode === "stealth") await applyStealthPatches(currentPage);
+          let newMsg = `Opened new tab: ${currentPage.url()}\nMode: ${currentMode}`;
+          if (isForcedStealth(currentPage.url())) newMsg += `\n!! STEALTH ENFORCED`;
+          return newMsg;
         }
         case "close": {
           if (pages.length <= 1) return "Cannot close last tab";
@@ -529,7 +579,6 @@ async function handleTool(name, args) {
         await sleep(gaussianDelay(200, 80, 80, 400));
       } else {
         await currentPage.mouse.wheel(0, args.direction === "down" ? amount : -amount);
-        await currentPage.waitForTimeout(300);
       }
       return `Scrolled ${args.direction} ${amount}px\nMode: ${currentMode}`;
     }
