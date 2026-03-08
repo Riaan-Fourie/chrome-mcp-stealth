@@ -330,8 +330,9 @@ async function ensureConnected() {
   const contexts = browser.contexts();
   if (contexts.length === 0) throw new Error("No browser contexts found. Is Chrome running?");
   defaultContext = contexts[0];
-  const pages = defaultContext.pages();
-  currentPage = pages.length > 0 ? pages[0] : await defaultContext.newPage();
+  // Always create a new tab so multiple MCP server instances
+  // sharing the same Chrome don't fight over the same page.
+  currentPage = await defaultContext.newPage();
 }
 
 async function forceReconnect() {
