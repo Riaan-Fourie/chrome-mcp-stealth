@@ -19,14 +19,14 @@ chrome-mcp/
 ## How It Works
 - Connects to Chrome via CDP on `http://127.0.0.1:9222` (configurable via `CDP_ENDPOINT` env var)
 - Chrome must be launched separately with `--remote-debugging-port=9222` and a non-default `--user-data-dir`
-- Default mode: **stealth** (Bezier mouse, Gaussian typing, anti-detection patches)
-- Fast mode available on request for non-protected domains
+- Default mode: **fast** (instant actions, no delays)
+- Stealth mode auto-activates on LinkedIn (and auto-restores fast when leaving)
 
 ## Key Architecture
 
 ### Modes
-- **Stealth** (default): human-like delays, Bezier mouse curves, scroll jitter, anti-detection JS patches
-- **Fast**: instant actions, no delays — blocked on stealth-only domains
+- **Fast** (default): instant actions, no delays
+- **Stealth**: human-like delays, Bezier mouse curves, scroll jitter, anti-detection JS patches — auto-activated on stealth-only domains, auto-restored to fast when leaving
 
 ### Stealth-Only Domains
 Defined in `STEALTH_ONLY_DOMAINS` set in `index.js`. These domains:
