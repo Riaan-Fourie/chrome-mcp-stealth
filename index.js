@@ -625,5 +625,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// ============================================================
+// EXPORTS (for testing — only pure/utility functions)
+// ============================================================
+
+export {
+  scanForInjection,
+  redactCredentials,
+  checkDomain,
+  spotlightContent,
+  buildSecurityReport,
+  isForcedStealth,
+  gaussian,
+  gaussianDelay,
+  cubicBezier,
+  getAccessibilityTree,
+  INJECTION_PATTERNS,
+  CREDENTIAL_PATTERNS,
+  SENSITIVE_DOMAINS,
+  BLOCKED_DOMAINS,
+  STEALTH_ONLY_DOMAINS,
+};
+
+// ============================================================
+// START SERVER (skip when imported for testing)
+// ============================================================
+
+const isMainModule = !process.argv[1] || import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
