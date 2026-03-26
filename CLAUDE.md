@@ -62,7 +62,7 @@ Registered as `chrome-stealth` in Jarvis's `.mcp.json`:
 ```json
 "chrome-stealth": {
   "command": "node",
-  "args": ["/path/to/project/repos/chrome-mcp/index.js"],
+  "args": ["path/to/chrome-mcp/index.js"],
   "env": { "CDP_ENDPOINT": "http://127.0.0.1:9222" }
 }
 ```
