@@ -560,8 +560,12 @@ async function handleTool(name, args) {
       break;
     }
     case "chrome_evaluate": {
+      if (typeof args.expression !== "string" || !args.expression.trim()) {
+        const got = Object.keys(args).join(", ") || "(none)";
+        throw new Error(`chrome_evaluate requires the "expression" parameter (string of JS to run in the page). Got keys: [${got}]. Common mistake: passing "function" or "code" — those are playwright/browser_evaluate's parameter names, not chrome-stealth's.`);
+      }
       const result = await currentPage.evaluate(args.expression);
-      return redactCredentials(JSON.stringify(result, null, 2));
+      return redactCredentials(JSON.stringify(result, null, 2) ?? "undefined");
     }
     case "chrome_wait": {
       if (args.selector) { await currentPage.waitForSelector(args.selector, { timeout: args.timeout || 5000 }); return `Found: ${args.selector}`; }
