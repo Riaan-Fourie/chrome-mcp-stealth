@@ -50,45 +50,62 @@ function enforceStealthIfNeeded() {
 
 // LAYER 6: chrome_evaluate is read-only on stealth-only domains. Anything
 // here can write to the page (or leave the page context) and is refused.
+// This is a deterrent for an agent reaching for a shortcut, not a sandbox: a
+// regex over source text can be talked around (Jarvis #490 tracks the
+// AST-based guard). Strings and comments are stripped before scanning, so a
+// selector or a payload is not read as code and a comment cannot split a
+// token. Escape sequences are refused outright: in a read-only expression
+// they can only be hiding an identifier. Fail closed: when in doubt, block.
+const ESCAPE_SEQUENCE = /\\u\{?[0-9a-fA-F]|\\x[0-9a-fA-F]{2}/;
+
+const LITERALS_AND_COMMENTS =
+  /\/\*[\s\S]*?\*\/|\/\/[^\n]*|`(?:\\[\s\S]|[^`\\])*`|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'/g;
+
+function stripLiteralsAndComments(expr) {
+  return expr.replace(LITERALS_AND_COMMENTS, (m) => (m.startsWith("/") ? " " : '""'));
+}
+
 // Assignment forms match "=" and the compound operators (+=, ||=) but not
-// "==" / "===", so comparisons still read. Fail closed: when in doubt, block.
+// "==" / "===", so comparisons still read.
 const WRITE_EXPRESSION_PATTERNS = [
-  /execCommand/,
-  /insertText/,
-  /innerHTML/,
-  /innerText\s*[-+*\/%&|^?]*=(?!=)/,
-  /textContent\s*[-+*\/%&|^?]*=(?!=)/,
-  /\.value\w*\s*[-+*\/%&|^?]*=(?!=)/,
-  /dispatchEvent/,
-  /setAttribute/,
-  /appendChild/,
-  /removeChild/,
-  /insertBefore/,
-  /replaceChild/,
-  /\.remove\(/,
-  /\.click\(/,
-  /\.submit\(/,
-  /\.focus\(/,
-  /createElement/,
-  /localStorage/,
-  /sessionStorage/,
-  /document\.cookie\s*[-+*\/%&|^?]*=(?!=)/,
-  /location\s*[-+*\/%&|^?]*=(?!=)/,
-  /location\.(assign|replace|reload)\s*\(/,
-  /location\.href\s*[-+*\/%&|^?]*=(?!=)/,
-  /\.(style|src|href|checked|selected|disabled|hidden)\s*[-+*\/%&|^?]*=(?!=)/,
-  // Other ways to insert or move text and nodes
-  /outerHTML|insertAdjacent|createTextNode|insertNode|setRangeText|document\.write/,
-  /\.(append|prepend|before|after|replaceWith|replaceChildren|blur|reset|requestSubmit|open)\(/,
-  /classList\.(add|remove|toggle|replace)\(|history\.(pushState|replaceState|back|forward|go)\(|indexedDB/,
-  // Leaving the page context: network, and code hidden in a string
-  /\b(fetch|sendBeacon|eval|Function)\(|XMLHttpRequest|WebSocket/,
-  // Any other property assignment, dotted or bracketed (el["value"] = x)
+  // Editing commands and text insertion
+  /execCommand|insertText|insertAdjacent|createTextNode|insertNode|setRangeText|document\s*\.\s*write|designMode/,
+  // Property writes on nodes and documents
+  /\.(innerHTML|outerHTML|innerText|textContent|value|valueAsNumber|valueAsDate)\s*[-+*\/%&|^?]*=(?!=)/,
+  /\.(style|src|href|checked|selected|disabled|hidden|open|contentEditable|draggable)\s*[-+*\/%&|^?]*=(?!=)/,
+  /document\s*\.\s*cookie\s*[-+*\/%&|^?]*=(?!=)/,
+  // DOM mutation and interaction methods
+  /\b(dispatchEvent|setAttribute|removeAttribute|toggleAttribute|appendChild|removeChild|insertBefore|replaceChild|createElement|cloneNode|importNode|adoptNode)\b/,
+  /\.(remove|click|submit|requestSubmit|focus|blur|reset|select|append|prepend|before|after|replaceWith|replaceChildren|open|close|show|showModal|scrollIntoView|scrollTo|scrollBy)\s*\(/,
+  /classList\s*\.\s*(add|remove|toggle|replace)\s*\(/,
+  // Navigation, history, storage, messaging, frames
+  /\blocation\s*[-+*\/%&|^?]*=(?!=)/,
+  /\blocation\s*\.\s*(assign|replace|reload)\s*\(/,
+  /\blocation\s*\.\s*href\s*[-+*\/%&|^?]*=(?!=)/,
+  /\bhistory\s*\.\s*(pushState|replaceState|back|forward|go)\s*\(/,
+  /\b(localStorage|sessionStorage|indexedDB|caches|postMessage|BroadcastChannel|clipboard|contentDocument|contentWindow|frames)\b/,
+  // Leaving the page context or hiding code: network, timers, code from strings
+  /\b(fetch|sendBeacon|open|eval|Function|setTimeout|setInterval|requestAnimationFrame|requestIdleCallback|queueMicrotask|importScripts)\s*\(/,
+  /\b(XMLHttpRequest|WebSocket|EventSource|Worker|SharedWorker|ServiceWorker|Notification)\b/,
+  /\bimport\s*\(|\bnew\s+Function\b|\bconstructor\b|\bwith\s*\(/,
+  // Reflection, prototype tricks, and computed member calls
+  /\b(Reflect|Object)\s*\.\s*(set|assign|defineProperty|defineProperties|setPrototypeOf|deleteProperty)\s*\(/,
+  /\.(call|apply|bind)\s*\(/,
+  /\bprototype\b/,
+  /\]\s*\(/,
+  // Ranges and selections that mutate
+  /\b(deleteContents|extractContents|surroundContents|deleteFromDocument|addRange|removeAllRanges|setBaseAndExtent|selectNode|selectNodeContents|selectAllChildren|collapse|extend|modify)\s*\(/,
+  // Any other property assignment or increment, dotted or bracketed (el["value"] = x)
   /(\.\w+|\])\s*[-+*\/%&|^?]*=(?!=)/,
+  /(\.\w+|\])\s*(\+\+|--)/,
+  /(\+\+|--)\s*[\w$]+\s*[.\[]/,
 ];
 
 function isWriteExpression(expr) {
-  return WRITE_EXPRESSION_PATTERNS.some((p) => p.test(expr));
+  if (typeof expr !== "string" || !expr.trim()) return true;
+  if (ESCAPE_SEQUENCE.test(expr)) return true;
+  const source = stripLiteralsAndComments(expr);
+  return WRITE_EXPRESSION_PATTERNS.some((p) => p.test(source));
 }
 
 // ============================================================
@@ -321,8 +338,11 @@ async function humanType(page, text) {
     const char = text[i];
     if (keystrokeFor(char).shiftEnter) {
       await page.keyboard.down("Shift");
-      await page.keyboard.press("Enter");
-      await page.keyboard.up("Shift");
+      try {
+        await page.keyboard.press("Enter", { delay: gaussianDelay(20, 8, 5, 60) });
+      } finally {
+        await page.keyboard.up("Shift");
+      }
     } else {
       await page.keyboard.type(char, { delay: 0 });
     }
@@ -703,7 +723,9 @@ export {
   buildSecurityReport,
   isForcedStealth,
   isWriteExpression,
+  stripLiteralsAndComments,
   keystrokeFor,
+  humanType,
   gaussian,
   gaussianDelay,
   cubicBezier,
