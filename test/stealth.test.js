@@ -4,6 +4,8 @@ import {
   isForcedStealth,
   isWriteExpression,
   keystrokeFor,
+  humanType,
+  stripLiteralsAndComments,
   gaussian,
   gaussianDelay,
   cubicBezier,
@@ -259,5 +261,111 @@ describe("isWriteExpression: location reads are allowed, location writes are blo
   it("blocks location.assign and location.replace calls", () => {
     assert.equal(isWriteExpression("location.assign('https://x')"), true);
     assert.equal(isWriteExpression("window.location.replace('https://x')"), true);
+  });
+});
+
+// ============================================================
+// Read-only guard hardening (Codex review, Jarvis #489)
+// ============================================================
+
+describe("isWriteExpression: bypasses found in review are refused", () => {
+  const writes = [
+    'Reflect.set(document.body, "text" + "Content", "Hi")',
+    'Object.assign(document.body, { ["inner" + "HTML"]: "<p>Hi</p>" })',
+    'Object.defineProperty(document.body, "textContent", { value: "Hi" })',
+    'document.body.textContent/*x*/="Hi"',
+    'document.body.text\\u0043ontent = "Hi"',
+    "setTimeout(\"Reflect.set(document.body,'text'+'Content','Hi')\")",
+    'HTMLFormElement.prototype.submit.call(document.querySelector("form"))',
+    'location.assign.call(location, "/feed/")',
+    'open("/feed/")',
+    'navigator.clipboard.writeText("Hi")',
+    'getSelection().deleteFromDocument()',
+    'document.createRange().deleteContents()',
+    'document.body.innerHTML += "<b>x</b>"',
+    'el["value"] = "x"',
+    'counter.value++',
+    'window["exec" + "Command"]("insertText", false, "x")',
+    'document.designMode = "on"',
+    'history.pushState({}, "", "/feed/")',
+    'localStorage.setItem("a", "b")',
+  ];
+  for (const expr of writes) {
+    it(`blocks ${expr.slice(0, 50)}`, () => {
+      assert.equal(isWriteExpression(expr), true);
+    });
+  }
+});
+
+describe("isWriteExpression: legitimate reads keep working", () => {
+  const reads = [
+    'document.body.innerHTML.length',
+    'JSON.stringify("el.value = x")',
+    '/* dispatchEvent */ document.body.innerText',
+    'location.href.slice(0, 80)',
+    "(() => { const t = document.querySelector('main').innerText; return t.replace(/\\n{2,}/g, '\\n').slice(0, 10); })()",
+    "Array.from(document.querySelectorAll('a')).map((a) => a.getAttribute('href')).filter((h) => h && h.length >= 3)",
+    "(() => { let e = document.body; e = e.parentElement; return e.tagName; })()",
+    "document.querySelector('[aria-label=\"Message\"]') !== null",
+    "(() => { const box = document.querySelector('div[role=\"textbox\"]'); return box ? box.innerText.trim().length : -1; })()",
+    "document.title",
+  ];
+  for (const expr of reads) {
+    it(`allows ${expr.slice(0, 50)}`, () => {
+      assert.equal(isWriteExpression(expr), false);
+    });
+  }
+  it("fails closed on an empty or missing expression", () => {
+    assert.equal(isWriteExpression(""), true);
+    assert.equal(isWriteExpression(undefined), true);
+  });
+});
+
+describe("stripLiteralsAndComments", () => {
+  it("removes comments and blanks strings, keeping code", () => {
+    const out = stripLiteralsAndComments('a("x // not a comment") /* c */ + `t${1}` // tail');
+    assert.equal(out.includes("not a comment"), false);
+    assert.equal(out.includes("c */"), false);
+    assert.equal(out.includes("tail"), false);
+    assert.equal(out.startsWith('a("")'), true);
+  });
+});
+
+describe("humanType: line breaks are Shift+Enter, never a bare Enter", () => {
+  it('types "a\\r\\nb\\rc" with two Shift+Enter presses and no bare Enter', async () => {
+    const calls = [];
+    const page = {
+      keyboard: {
+        type: async (c) => { calls.push(["type", c]); },
+        down: async (k) => { calls.push(["down", k]); },
+        up: async (k) => { calls.push(["up", k]); },
+        press: async (k) => { calls.push(["press", k]); },
+      },
+    };
+    await humanType(page, "a\r\nb\rc");
+    const typed = calls.filter((c) => c[0] === "type").map((c) => c[1]).join("");
+    assert.equal(typed, "abc");
+    const presses = calls.filter((c) => c[0] === "press");
+    assert.equal(presses.length, 2);
+    for (let i = 0; i < calls.length; i++) {
+      if (calls[i][0] === "press") {
+        assert.equal(calls[i][1], "Enter");
+        assert.deepEqual(calls[i - 1], ["down", "Shift"]);
+        assert.deepEqual(calls[i + 1], ["up", "Shift"]);
+      }
+    }
+  });
+  it("releases Shift even when the Enter press throws", async () => {
+    const calls = [];
+    const page = {
+      keyboard: {
+        type: async () => {},
+        down: async (k) => { calls.push(["down", k]); },
+        up: async (k) => { calls.push(["up", k]); },
+        press: async () => { throw new Error("boom"); },
+      },
+    };
+    await assert.rejects(() => humanType(page, "\n"));
+    assert.deepEqual(calls, [["down", "Shift"], ["up", "Shift"]]);
   });
 });
