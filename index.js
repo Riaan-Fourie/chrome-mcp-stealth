@@ -74,7 +74,8 @@ const WRITE_EXPRESSION_PATTERNS = [
   /sessionStorage/,
   /document\.cookie\s*[-+*\/%&|^?]*=(?!=)/,
   /location\s*[-+*\/%&|^?]*=(?!=)/,
-  /location\.(assign|replace|href|reload)/,
+  /location\.(assign|replace|reload)\s*\(/,
+  /location\.href\s*[-+*\/%&|^?]*=(?!=)/,
   /\.(style|src|href|checked|selected|disabled|hidden)\s*[-+*\/%&|^?]*=(?!=)/,
   // Other ways to insert or move text and nodes
   /outerHTML|insertAdjacent|createTextNode|insertNode|setRangeText|document\.write/,
