@@ -248,3 +248,16 @@ describe("getAccessibilityTree", () => {
     assert.ok(result.includes("(https://example.com)"));
   });
 });
+
+describe("isWriteExpression: location reads are allowed, location writes are blocked", () => {
+  it("allows reading location.href", () => {
+    assert.equal(isWriteExpression("location.href.slice(0, 80)"), false);
+  });
+  it("blocks assigning location.href", () => {
+    assert.equal(isWriteExpression("location.href = 'https://x'"), true);
+  });
+  it("blocks location.assign and location.replace calls", () => {
+    assert.equal(isWriteExpression("location.assign('https://x')"), true);
+    assert.equal(isWriteExpression("window.location.replace('https://x')"), true);
+  });
+});
