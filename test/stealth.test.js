@@ -2,6 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   isForcedStealth,
+  isWriteExpression,
+  keystrokeFor,
   gaussian,
   gaussianDelay,
   cubicBezier,
@@ -40,6 +42,67 @@ describe("isForcedStealth", () => {
   it("handles invalid URLs gracefully", () => {
     assert.equal(isForcedStealth("not-a-url"), false);
     assert.equal(isForcedStealth(""), false);
+  });
+});
+
+// ============================================================
+// Read-only chrome_evaluate on Stealth Domains
+// ============================================================
+
+describe("isWriteExpression", () => {
+  it("blocks execCommand", () => {
+    assert.equal(isWriteExpression(`document.execCommand("insertText", false, "Hi Sam")`), true);
+  });
+
+  it("blocks innerHTML assignment", () => {
+    assert.equal(isWriteExpression(`document.querySelector(".msg-form").innerHTML = "<p>Hi</p>"`), true);
+  });
+
+  it("blocks .value assignment", () => {
+    assert.equal(isWriteExpression(`document.querySelector("textarea").value = "Hi"`), true);
+    assert.equal(isWriteExpression(`el.value += "more"`), true);
+  });
+
+  it("blocks location.href assignment", () => {
+    assert.equal(isWriteExpression(`location.href = "https://www.linkedin.com/feed/"`), true);
+    assert.equal(isWriteExpression(`window.location.assign("/feed/")`), true);
+  });
+
+  it("blocks dispatchEvent, click and bracketed property writes", () => {
+    assert.equal(isWriteExpression(`el.dispatchEvent(new InputEvent("input"))`), true);
+    assert.equal(isWriteExpression(`document.querySelector("button.send").click()`), true);
+    assert.equal(isWriteExpression(`el["innerText"] = "Hi"`), true);
+  });
+
+  it("allows an innerText read", () => {
+    assert.equal(isWriteExpression(`document.querySelector(".msg-form__contenteditable").innerText`), false);
+    assert.equal(isWriteExpression(`document.body.innerText.length`), false);
+  });
+
+  it("allows JSON.stringify of page data", () => {
+    assert.equal(isWriteExpression(`JSON.stringify({a: document.title})`), false);
+  });
+
+  it("allows comparisons, getAttribute and arrow functions", () => {
+    assert.equal(isWriteExpression(`el.innerText === "Sent"`), false);
+    assert.equal(isWriteExpression(`el.getAttribute("aria-disabled") == "true"`), false);
+    assert.equal(isWriteExpression(`[...document.querySelectorAll("a")].map((a) => a.getAttribute("href"))`), false);
+  });
+});
+
+// ============================================================
+// Line Breaks Typed as Shift+Enter
+// ============================================================
+
+describe("keystrokeFor", () => {
+  it("maps a line break to Shift+Enter", () => {
+    assert.deepEqual(keystrokeFor("\n"), { shiftEnter: true });
+  });
+
+  it("types a normal character as itself", () => {
+    assert.deepEqual(keystrokeFor("a"), { shiftEnter: false });
+    assert.deepEqual(keystrokeFor(" "), { shiftEnter: false });
+    assert.deepEqual(keystrokeFor("."), { shiftEnter: false });
   });
 });
 

@@ -48,6 +48,48 @@ function enforceStealthIfNeeded() {
   } catch { /* page might be closed */ }
 }
 
+// LAYER 6: chrome_evaluate is read-only on stealth-only domains. Anything
+// here can write to the page (or leave the page context) and is refused.
+// Assignment forms match "=" and the compound operators (+=, ||=) but not
+// "==" / "===", so comparisons still read. Fail closed: when in doubt, block.
+const WRITE_EXPRESSION_PATTERNS = [
+  /execCommand/,
+  /insertText/,
+  /innerHTML/,
+  /innerText\s*[-+*\/%&|^?]*=(?!=)/,
+  /textContent\s*[-+*\/%&|^?]*=(?!=)/,
+  /\.value\w*\s*[-+*\/%&|^?]*=(?!=)/,
+  /dispatchEvent/,
+  /setAttribute/,
+  /appendChild/,
+  /removeChild/,
+  /insertBefore/,
+  /replaceChild/,
+  /\.remove\(/,
+  /\.click\(/,
+  /\.submit\(/,
+  /\.focus\(/,
+  /createElement/,
+  /localStorage/,
+  /sessionStorage/,
+  /document\.cookie\s*[-+*\/%&|^?]*=(?!=)/,
+  /location\s*[-+*\/%&|^?]*=(?!=)/,
+  /location\.(assign|replace|href|reload)/,
+  /\.(style|src|href|checked|selected|disabled|hidden)\s*[-+*\/%&|^?]*=(?!=)/,
+  // Other ways to insert or move text and nodes
+  /outerHTML|insertAdjacent|createTextNode|insertNode|setRangeText|document\.write/,
+  /\.(append|prepend|before|after|replaceWith|replaceChildren|blur|reset|requestSubmit|open)\(/,
+  /classList\.(add|remove|toggle|replace)\(|history\.(pushState|replaceState|back|forward|go)\(|indexedDB/,
+  // Leaving the page context: network, and code hidden in a string
+  /\b(fetch|sendBeacon|eval|Function)\(|XMLHttpRequest|WebSocket/,
+  // Any other property assignment, dotted or bracketed (el["value"] = x)
+  /(\.\w+|\])\s*[-+*\/%&|^?]*=(?!=)/,
+];
+
+function isWriteExpression(expr) {
+  return WRITE_EXPRESSION_PATTERNS.some((p) => p.test(expr));
+}
+
 // ============================================================
 // SECURITY: Prompt Injection Defense Layer
 // ============================================================
@@ -264,12 +306,25 @@ async function humanClick(page, selector) {
   await sleep(gaussianDelay(700, 250, 300, 1500));
 }
 
+// A line break inside a message is typed as Shift+Enter. A bare Enter is only
+// ever pressed by chrome_type's pressEnter flag, because on chat UIs it sends.
+function keystrokeFor(char) {
+  return { shiftEnter: char === "\n" };
+}
+
 async function humanType(page, text) {
   let charsSinceLastPause = 0;
   const nextPauseAt = Math.floor(gaussian(10, 3));
+  text = text.replace(/\r\n?/g, "\n");
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
-    await page.keyboard.type(char, { delay: 0 });
+    if (keystrokeFor(char).shiftEnter) {
+      await page.keyboard.down("Shift");
+      await page.keyboard.press("Enter");
+      await page.keyboard.up("Shift");
+    } else {
+      await page.keyboard.type(char, { delay: 0 });
+    }
     let delay = gaussianDelay(75, 25, 20, 200);
     if (char === " ") delay += gaussianDelay(30, 15, 0, 80);
     if (".!?,;:".includes(char)) delay += gaussianDelay(100, 40, 30, 250);
@@ -398,7 +453,7 @@ const tools = [
   },
   {
     name: "chrome_type",
-    description: "Type text. Stealth: Gaussian delays + thinking pauses. Fast: instant. Credential patterns blocked.",
+    description: "Type text. Stealth: Gaussian delays + thinking pauses, line breaks typed as Shift+Enter (bare Enter only via pressEnter). Fast: instant. Credential patterns blocked.",
     inputSchema: { type: "object", properties: { text: { type: "string" }, selector: { type: "string" }, pressEnter: { type: "boolean", default: false } }, required: ["text"] },
   },
   {
@@ -408,7 +463,7 @@ const tools = [
   },
   {
     name: "chrome_evaluate",
-    description: "Execute JavaScript in page context. Output scanned for credential leaks.",
+    description: "Execute JavaScript in page context. Output scanned for credential leaks. Read-only on stealth-only domains (LinkedIn): expressions that write to the page are refused, use chrome_type and chrome_click.",
     inputSchema: { type: "object", properties: { expression: { type: "string" } }, required: ["expression"] },
   },
   {
@@ -564,6 +619,12 @@ async function handleTool(name, args) {
         const got = Object.keys(args).join(", ") || "(none)";
         throw new Error(`chrome_evaluate requires the "expression" parameter (string of JS to run in the page). Got keys: [${got}]. Common mistake: passing "function" or "code" — those are playwright/browser_evaluate's parameter names, not chrome-stealth's.`);
       }
+      // LAYER 6: read-only on stealth-only domains. A write from page script
+      // (execCommand, innerText =, dispatchEvent) is a paste signature.
+      const url = currentPage.url();
+      if (isForcedStealth(url) && isWriteExpression(args.expression)) {
+        return `BLOCKED: chrome_evaluate is read-only on ${new URL(url).hostname} (stealth domain). Use chrome_type and chrome_click.`;
+      }
       const result = await currentPage.evaluate(args.expression);
       return redactCredentials(JSON.stringify(result, null, 2) ?? "undefined");
     }
@@ -640,6 +701,8 @@ export {
   spotlightContent,
   buildSecurityReport,
   isForcedStealth,
+  isWriteExpression,
+  keystrokeFor,
   gaussian,
   gaussianDelay,
   cubicBezier,
@@ -649,6 +712,7 @@ export {
   SENSITIVE_DOMAINS,
   BLOCKED_DOMAINS,
   STEALTH_ONLY_DOMAINS,
+  WRITE_EXPRESSION_PATTERNS,
 };
 
 // ============================================================
