@@ -6,6 +6,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { chromium } from "playwright-core";
 import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import { createRequire } from "node:module";
 
 const CDP_ENDPOINT = process.env.CDP_ENDPOINT || "http://127.0.0.1:9222";
 
@@ -731,6 +734,7 @@ export {
   gaussianDelay,
   cubicBezier,
   getAccessibilityTree,
+  isEntryPoint,
   INJECTION_PATTERNS,
   CREDENTIAL_PATTERNS,
   SENSITIVE_DOMAINS,
@@ -743,13 +747,39 @@ export {
 // START SERVER (skip when imported for testing)
 // ============================================================
 
-// `pathToFileURL`, never `file://` + the raw path (Jarvis #494). `import.meta.url`
-// percent-encodes, so a path holding a space - or any character a URL encodes -
-// never matches a hand-built string, the guard reads as "imported for testing",
-// the transport is never connected, and node exits 0 in silence. The client sees
-// only CONNECTION_CLOSED, with nothing on stdout or stderr to explain it. This
-// machine runs from "/Users/riaanfourie/Personal Projects/...", where it failed.
-const isMainModule = !process.argv[1] || import.meta.url === pathToFileURL(process.argv[1]).href;
+// Every mismatch this guard can produce looks identical from outside: the transport
+// is never connected, node exits 0, nothing reaches stdout or stderr, and the MCP
+// client reports only CONNECTION_CLOSED. So compare the two sides the way node
+// itself derives them, rather than trusting `process.argv[1]` as typed.
+//
+//   - `pathToFileURL`, never `file://` + the raw path (Jarvis #494): `import.meta.url`
+//     percent-encodes, so a path holding a space never matches a hand-built string.
+//     This machine runs from "/Users/riaanfourie/Personal Projects/...".
+//   - realpath both sides (Jarvis #495): the ESM loader realpath-resolves
+//     `import.meta.url`, so any symlink in the invocation path made them disagree.
+//   - resolve a directory argument to the file node actually loads, so `node .`
+//     and `node path/to/chrome-mcp` are recognised too.
+//
+// The as-given comparison stays first: under `--preserve-symlinks-main`
+// `import.meta.url` is the link path, and realpath-resolving would break it again.
+function isEntryPoint(moduleUrl, entryArg, cwd = process.cwd()) {
+  if (!entryArg) return true; // `node --eval`, REPL, embedder: nothing to compare
+  const absolute = resolvePath(cwd, entryArg);
+  if (moduleUrl === pathToFileURL(absolute).href) return true;
+  let entryFile = absolute;
+  try {
+    entryFile = createRequire(pathToFileURL(absolute)).resolve(absolute);
+  } catch {
+    // Not resolvable as a module specifier - fall back to the path itself.
+  }
+  try {
+    return moduleUrl === pathToFileURL(realpathSync(entryFile)).href;
+  } catch {
+    return false; // the entry path no longer exists
+  }
+}
+
+const isMainModule = isEntryPoint(import.meta.url, process.argv[1]);
 if (isMainModule) {
   const transport = new StdioServerTransport();
   await server.connect(transport);
