@@ -5,6 +5,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { chromium } from "playwright-core";
+import { pathToFileURL } from "node:url";
 
 const CDP_ENDPOINT = process.env.CDP_ENDPOINT || "http://127.0.0.1:9222";
 
@@ -742,7 +743,13 @@ export {
 // START SERVER (skip when imported for testing)
 // ============================================================
 
-const isMainModule = !process.argv[1] || import.meta.url === `file://${process.argv[1]}`;
+// `pathToFileURL`, never `file://` + the raw path (Jarvis #494). `import.meta.url`
+// percent-encodes, so a path holding a space - or any character a URL encodes -
+// never matches a hand-built string, the guard reads as "imported for testing",
+// the transport is never connected, and node exits 0 in silence. The client sees
+// only CONNECTION_CLOSED, with nothing on stdout or stderr to explain it. This
+// machine runs from "/Users/riaanfourie/Personal Projects/...", where it failed.
+const isMainModule = !process.argv[1] || import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMainModule) {
   const transport = new StdioServerTransport();
   await server.connect(transport);
