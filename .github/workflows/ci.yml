@@ -9,4 +9,6 @@ jobs:
         with:
           node-version: '20'
       - run: npm ci
-      - run: node --test test/security.test.js test/stealth.test.js
+      # `npm test` is `node --test test/*.test.js`: naming files here meant a new
+      # test file silently never ran in CI (the main-module guard, Jarvis #495).
+      - run: npm test
