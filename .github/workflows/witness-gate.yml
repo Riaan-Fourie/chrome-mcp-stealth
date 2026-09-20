@@ -14,7 +14,16 @@ name: Witness gate
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize, ready_for_review]
+    types:
+      [
+        opened,
+        edited,
+        reopened,
+        synchronize,
+        ready_for_review,
+        labeled,
+        unlabeled,
+      ]
 
 permissions:
   contents: read
@@ -31,6 +40,10 @@ jobs:
           # Read through env, never inlined into the script: a PR body is
           # attacker-controlled text and `${{ }}` inside `run` is an injection.
           BODY: ${{ github.event.pull_request.body }}
+          # The exemption is a label, never body text. Writing about the token
+          # must not activate it - see the note in witness-gate.sh. Passed as
+          # JSON so each name stays quote-delimited and cannot match a prefix.
+          WITNESS_GATE_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: |
           set -euo pipefail
           if printf '%s' "$BODY" | bash .github/scripts/witness-gate.sh; then
