@@ -28,6 +28,13 @@ on:
 permissions:
   contents: read
 
+# A body edit and a label change can land within a second of each other. Without
+# this, two runs race and the loser can report last, leaving the check green on a
+# body that should block it.
+concurrency:
+  group: witness-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   witness-declared:
     name: witness declared
@@ -67,9 +74,11 @@ jobs:
             echo "**To clear this check, do one of:**"
             echo
             echo "1. Run the witness in a separate session (\`/witness <issue#>\`), then edit"
-            echo "   the marker out of the PR body. The check re-runs on the edit alone."
-            echo "2. If this PR is about the witness machinery itself and only quotes the"
-            echo "   marker, add \`<!-- witness-gate: exempt -->\` to the body."
+            echo "   that wording out of the PR body. The check re-runs on the edit alone."
+            echo "2. If this PR only discusses the wording rather than declaring itself"
+            echo "   uncertified, apply the \`witness-gate-exempt\` **label**. The exemption"
+            echo "   is a label and never body text - writing the token into the body does"
+            echo "   nothing, by design."
             echo
             echo "Do not merge past this by disabling the check."
           } >> "$GITHUB_STEP_SUMMARY"
