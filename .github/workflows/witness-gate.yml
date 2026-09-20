@@ -1,0 +1,63 @@
+name: Witness gate
+
+# A PR that declares itself uncertified must not be mergeable (Jarvis #510).
+#
+# PR #5 carried "Not yet witnessed ... Please do not merge before that" in bold,
+# in its own body, and was merged anyway while the witness session was still
+# running - taking the worktree and the branch ref with it. The instruction was
+# already in the most visible place available and prose did not hold it, so the
+# gate is a required status check instead: while the marker is in the body, the
+# merge button is disabled.
+#
+# `edited` is in the trigger list on purpose: removing the marker is a body edit,
+# not a new commit, and the check has to re-run on that alone.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  witness-declared:
+    name: witness declared
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail while the PR declares itself not yet witnessed
+        env:
+          # Read through env, never inlined into the script: a PR body is
+          # attacker-controlled text and `${{ }}` inside `run` is an injection.
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$BODY" | bash .github/scripts/witness-gate.sh; then
+            {
+              echo "### ✅ Witness gate"
+              echo
+              echo "The PR body carries no uncertified marker."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "### ❌ Witness gate"
+            echo
+            echo "This PR body still declares itself uncertified."
+            echo
+            echo "Jarvis #495 was merged and closed while its witness session was still"
+            echo "running. The certification only held because the merged bytes happened"
+            echo "to be identical to what had already been tested."
+            echo
+            echo "**To clear this check, do one of:**"
+            echo
+            echo "1. Run the witness in a separate session (\`/witness <issue#>\`), then edit"
+            echo "   the marker out of the PR body. The check re-runs on the edit alone."
+            echo "2. If this PR is about the witness machinery itself and only quotes the"
+            echo "   marker, add \`<!-- witness-gate: exempt -->\` to the body."
+            echo
+            echo "Do not merge past this by disabling the check."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
