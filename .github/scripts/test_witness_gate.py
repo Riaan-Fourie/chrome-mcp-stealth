@@ -81,7 +81,20 @@ case("marker, html5 --!> close", "<!-- witness: pending --!>", [], BLOCK)
 case("marker, left-to-right mark inside", "<!-- witness:‎ pending -->", [], BLOCK)
 case("marker, uppercase", "<!-- WITNESS: PENDING -->", [], BLOCK)
 case("marker, newline inside", "<!-- witness:\npending -->", [], BLOCK)
+case("marker, trailing --> deleted", "<!-- witness: pending", [], BLOCK)
+case("template with only --> deleted",
+     open(__file__.rsplit("/", 2)[0] + "/pull_request_template.md").read()
+     .replace("<!-- witness: pending -->", "<!-- witness: pending", 1), [], BLOCK)
+case("marker, ---> close", "<!-- witness: pending --->", [], BLOCK)
+case("marker, colon removed", "<!-- witness pending -->", [], BLOCK)
+case("marker, right-to-left override inside", "<!-- witness:‮ pending -->", [], BLOCK)
+case("marker, left-to-right override inside", "<!-- wit‭ness: pending -->", [], BLOCK)
+case("marker, tag character inside", "<!-- witness:\U000e0020 pending -->", [], BLOCK)
+case("marker, hangul filler inside", "<!-- witness:ㅤpending -->", [], BLOCK)
+case("phrase split by <br>", "This is not yet<br>witnessed.", [], BLOCK)
+case("phrase with word joiner", "not yet wit⁠nessed", [], BLOCK)
 case("not the marker", "<!-- witness: done -->", [], ALLOW)
+case("comment about pending work", "<!-- pending: tidy the witness notes -->", [], ALLOW)
 case("comment mentioning witness", "<!-- ask the witness about this -->", [], ALLOW)
 
 # --- accepted residual -------------------------------------------------------
@@ -100,7 +113,7 @@ case("empty body", "", [], ALLOW)
 case("whitespace only", "   \n\t  ", [], ALLOW)
 
 
-def boundary_cases() -> list[str]:
+def boundary_cases() -> tuple[list[str], int]:
     """Exercise the real stdin and env boundaries, not just decide().
 
     Mutation testing found these were the only two surviving mutants: the suite
@@ -114,6 +127,12 @@ def boundary_cases() -> list[str]:
         ("stdin marker blocks", MARKER, "[]", 1),
         ("stdin clean allows", "All witnessed.", "[]", 0),
         ("stdin large body blocks", MARKER + "\n" + "x" * 70_000, "[]", 1),
+        # Marker LAST: a gate that reads only the first line, or only the first
+        # 64KB, passes every marker-first test. This is the same class as the
+        # original SIGPIPE defect, which lost the body past ~61.5KB.
+        ("stdin marker at end of 70KB blocks", "x" * 70_000 + "\n" + MARKER, "[]", 1),
+        ("stdin marker at end of 200KB blocks", "y\n" * 100_000 + MARKER, "[]", 1),
+        ("stdin phrase on last line blocks", "ok\n" * 30_000 + "not yet witnessed", "[]", 1),
         ("label exempts", MARKER, '["witness-gate-exempt"]', 0),
         ("malformed label json does not exempt", MARKER, "{not json", 1),
         ("empty label env does not exempt", MARKER, "", 1),
@@ -133,7 +152,7 @@ def boundary_cases() -> list[str]:
             failures.append(
                 f"  boundary/{name}: expected exit {expect}, got {proc.returncode}"
             )
-    return failures
+    return failures, len(checks)
 
 
 def main() -> int:
@@ -146,11 +165,11 @@ def main() -> int:
                 f"got {'BLOCK' if got else 'ALLOW'} - {message.splitlines()[0]}"
             )
     passed = len(cases) - len(failures)
-    boundary = boundary_cases()
+    boundary, BOUNDARY_COUNT = boundary_cases()
     failures += boundary
     print(
         f"witness gate: {passed}/{len(cases)} fixtures and "
-        f"{7 - len(boundary)}/7 boundary checks passed"
+        f"{BOUNDARY_COUNT - len(boundary)}/{BOUNDARY_COUNT} boundary checks passed"
     )
     for line in failures:
         print(line)

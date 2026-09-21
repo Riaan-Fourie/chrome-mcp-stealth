@@ -43,7 +43,12 @@ EXEMPT_LABEL = "witness-gate-exempt"
 # found rendering invisible yet passing - no inner spaces, no space after the
 # colon, a space before it, a trailing full stop, the HTML5 `--!>` close, and a
 # left-to-right mark inside. Match the shape, not one exact string.
-MARKER_RE = re.compile(r"<!--\s*witness\s*:\s*pending\s*[.!?]?\s*--!?>", re.IGNORECASE)
+#
+# The close is deliberately NOT required. Deleting just the trailing `-->` from
+# the template line leaves a description GitHub renders identically to the
+# untouched template, so the author sees the marker as gone while it is not.
+# The colon is optional for the same reason.
+MARKER_RE = re.compile(r"<!--\s*witness\s*:?\s*pending", re.IGNORECASE)
 
 # Hedged and specific. Nothing here is ordinary English a normal PR would use.
 PHRASES = (
@@ -53,19 +58,26 @@ PHRASES = (
     "witness pending",
 )
 
-# Zero-width, soft hyphen, and the directional marks and isolates, which are
-# invisible but split a match. A soft hyphen or non-breaking space arrives by
-# accident from copy-paste, so this is not only about deliberate evasion.
-ZERO_WIDTH = dict.fromkeys(
-    map(ord, "​‌‍‎‏⁠﻿­⁦⁧⁨⁩"),
-    None,
-)
+# Invisible characters split a match. Every Unicode "format" character (category
+# Cf: zero-width, soft hyphen, directional marks, overrides, isolates, tag
+# characters) is stripped by category rather than from a hand-kept list, which
+# kept missing some. The Hangul fillers render blank but are letters, so they
+# are listed. A soft hyphen or non-breaking space arrives by accident from
+# copy-paste, so this is not only about deliberate evasion.
+FILLERS = frozenset("ᅟᅠㅤﾠ")
+
+
+def _strip_invisible(text: str) -> str:
+    return "".join(
+        c for c in text if c not in FILLERS and unicodedata.category(c) != "Cf"
+    )
 
 
 def _fold(text: str, tags: str | None = " ") -> str:
     text = html.unescape(text)          # &nbsp; &lt;span&gt; and friends
-    text = text.translate(ZERO_WIDTH)   # zero-width and soft hyphen
+    text = _strip_invisible(text)
     text = unicodedata.normalize("NFKC", text)
+    text = _strip_invisible(text)       # NFKC can surface new ones
     if tags is not None:
         text = re.sub(r"<[^>]*>", tags, text)
     text = re.sub(r"[*_`~]", "", text)        # markdown emphasis
