@@ -133,6 +133,10 @@ def boundary_cases() -> tuple[list[str], int]:
         ("stdin marker at end of 70KB blocks", "x" * 70_000 + "\n" + MARKER, "[]", 1),
         ("stdin marker at end of 200KB blocks", "y\n" * 100_000 + MARKER, "[]", 1),
         ("stdin phrase on last line blocks", "ok\n" * 30_000 + "not yet witnessed", "[]", 1),
+        # A reader that stops at the first blank line passed every body above,
+        # because none of them contain one. Real PR descriptions always do.
+        ("stdin marker after a blank line blocks", "ok\n\n" + MARKER, "[]", 1),
+        ("stdin marker after many paragraphs blocks", "para\n\n" * 500 + MARKER, "[]", 1),
         ("label exempts", MARKER, '["witness-gate-exempt"]', 0),
         ("malformed label json does not exempt", MARKER, "{not json", 1),
         ("empty label env does not exempt", MARKER, "", 1),
