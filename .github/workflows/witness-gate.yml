@@ -1,0 +1,88 @@
+name: Witness gate
+
+# A PR that has not been witnessed must not be mergeable (Jarvis #510).
+#
+# The pull request template ships `<!-- witness: pending -->`, so a PR starts
+# blocked and the author deletes that line once a separate session has witnessed
+# the work. Deleting it is the deliberate act.
+#
+# `edited` is in the trigger list because deleting the marker is a body edit and
+# not a new commit, so the check has to re-run on that alone. `labeled` and
+# `unlabeled` are there because the exemption is a label.
+
+on:
+  pull_request:
+    types:
+      [
+        opened,
+        edited,
+        reopened,
+        synchronize,
+        ready_for_review,
+        labeled,
+        unlabeled,
+      ]
+
+permissions:
+  contents: read
+
+# A body edit and a label change can land within a second of each other. Without
+# this, two runs race and the loser can report last, leaving the check green on a
+# body that should block it.
+concurrency:
+  group: witness-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  witness-declared:
+    name: witness declared
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The gate's own fixtures. Every one is a defect it actually had, or a
+      # body it actually blocked when it should not have. If these stop passing,
+      # the gate is not trustworthy and the job should fail before it judges
+      # anything.
+      - name: Self-test the gate
+        run: python3 .github/scripts/test_witness_gate.py
+
+      - name: Decide
+        env:
+          # Read through env, never inlined into the script: a PR body is
+          # attacker-controlled text and `${{ }}` inside `run` is an injection.
+          BODY: ${{ github.event.pull_request.body }}
+          # The exemption is a label, never body text, so that writing about the
+          # token cannot switch the gate off.
+          WITNESS_GATE_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$BODY" | python3 .github/scripts/witness_gate.py; then
+            {
+              echo "### ✅ Witness gate"
+              echo
+              echo "No pending-witness marker and no uncertified declaration."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "### ❌ Witness gate"
+            echo
+            echo "This PR has not been witnessed."
+            echo
+            echo "Jarvis #495 was merged and closed while its witness session was still"
+            echo "running. The certification only held because the merged bytes happened"
+            echo "to be identical to what had already been tested."
+            echo
+            echo "**To clear this check:**"
+            echo
+            echo "1. Witness the work in a separate session (\`/witness <issue#>\`)."
+            echo "2. Delete the \`<!-- witness: pending -->\` line from the PR description."
+            echo "   The check re-runs on that edit alone."
+            echo
+            echo "If this PR only *discusses* the marker rather than awaiting a witness,"
+            echo "apply the \`witness-gate-exempt\` **label**. The exemption is a label and"
+            echo "never body text - writing the token into the description does nothing."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
