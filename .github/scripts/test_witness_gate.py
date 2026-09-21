@@ -71,9 +71,69 @@ case("body documents the exempt token",
 case("body documents it, no marker",
      "Apply the `witness-gate-exempt` label to opt out.", [], ALLOW)
 
+# --- mangled markers: invisible when rendered, so both author and a strict
+# --- matcher see nothing. All of these must still block.
+case("marker, no inner spaces", "<!--witness: pending-->", [], BLOCK)
+case("marker, no space after colon", "<!-- witness:pending -->", [], BLOCK)
+case("marker, space before colon", "<!-- witness : pending -->", [], BLOCK)
+case("marker, trailing full stop", "<!-- witness: pending. -->", [], BLOCK)
+case("marker, html5 --!> close", "<!-- witness: pending --!>", [], BLOCK)
+case("marker, left-to-right mark inside", "<!-- witness:‎ pending -->", [], BLOCK)
+case("marker, uppercase", "<!-- WITNESS: PENDING -->", [], BLOCK)
+case("marker, newline inside", "<!-- witness:\npending -->", [], BLOCK)
+case("not the marker", "<!-- witness: done -->", [], ALLOW)
+case("comment mentioning witness", "<!-- ask the witness about this -->", [], ALLOW)
+
+# --- accepted residual -------------------------------------------------------
+# A PR that quotes the gate's own failure line is blocked, because that line
+# necessarily contains the phrase. This is recorded rather than papered over
+# with a weaker stand-in: the remedy is the exemption label, which is exactly
+# what a PR about this machinery should carry.
+case("PR quoting the gate's failure line",
+     'The gate prints: BLOCKED: this PR says "not yet witnessed".', [], BLOCK)
+case("same, with the exemption label",
+     'The gate prints: BLOCKED: this PR says "not yet witnessed".',
+     ["witness-gate-exempt"], ALLOW)
+
 # --- degenerate --------------------------------------------------------------
 case("empty body", "", [], ALLOW)
 case("whitespace only", "   \n\t  ", [], ALLOW)
+
+
+def boundary_cases() -> list[str]:
+    """Exercise the real stdin and env boundaries, not just decide().
+
+    Mutation testing found these were the only two surviving mutants: the suite
+    never called labels() or main(), so the env and stdin edges had no coverage
+    at all. That is precisely where the original SIGPIPE defect lived.
+    """
+    import subprocess
+
+    script = __file__.rsplit("/", 1)[0] + "/witness_gate.py"
+    checks = [
+        ("stdin marker blocks", MARKER, "[]", 1),
+        ("stdin clean allows", "All witnessed.", "[]", 0),
+        ("stdin large body blocks", MARKER + "\n" + "x" * 70_000, "[]", 1),
+        ("label exempts", MARKER, '["witness-gate-exempt"]', 0),
+        ("malformed label json does not exempt", MARKER, "{not json", 1),
+        ("empty label env does not exempt", MARKER, "", 1),
+        ("null label json does not exempt", MARKER, "null", 1),
+    ]
+    failures = []
+    for name, body, labels_json, expect in checks:
+        proc = subprocess.run(
+            [sys.executable, script],
+            input=body,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**__import__("os").environ, "WITNESS_GATE_LABELS_JSON": labels_json},
+        )
+        if proc.returncode != expect:
+            failures.append(
+                f"  boundary/{name}: expected exit {expect}, got {proc.returncode}"
+            )
+    return failures
 
 
 def main() -> int:
@@ -85,7 +145,13 @@ def main() -> int:
                 f"  {name}: expected {'BLOCK' if expect else 'ALLOW'}, "
                 f"got {'BLOCK' if got else 'ALLOW'} - {message.splitlines()[0]}"
             )
-    print(f"witness gate: {len(cases) - len(failures)}/{len(cases)} fixtures passed")
+    passed = len(cases) - len(failures)
+    boundary = boundary_cases()
+    failures += boundary
+    print(
+        f"witness gate: {passed}/{len(cases)} fixtures and "
+        f"{7 - len(boundary)}/7 boundary checks passed"
+    )
     for line in failures:
         print(line)
     return 1 if failures else 0

@@ -37,6 +37,14 @@ import unicodedata
 MARKER = "<!-- witness: pending -->"
 EXEMPT_LABEL = "witness-gate-exempt"
 
+# The marker is an HTML comment, so a mangled one is INVISIBLE in the rendered
+# description: the author sees nothing and believes they deleted it, while a
+# strict match sees nothing either and lets the PR through. Six spellings were
+# found rendering invisible yet passing - no inner spaces, no space after the
+# colon, a space before it, a trailing full stop, the HTML5 `--!>` close, and a
+# left-to-right mark inside. Match the shape, not one exact string.
+MARKER_RE = re.compile(r"<!--\s*witness\s*:\s*pending\s*[.!?]?\s*--!?>", re.IGNORECASE)
+
 # Hedged and specific. Nothing here is ordinary English a normal PR would use.
 PHRASES = (
     "not yet witnessed",
@@ -45,7 +53,13 @@ PHRASES = (
     "witness pending",
 )
 
-ZERO_WIDTH = dict.fromkeys(map(ord, "​‌‍⁠﻿­"), None)
+# Zero-width, soft hyphen, and the directional marks and isolates, which are
+# invisible but split a match. A soft hyphen or non-breaking space arrives by
+# accident from copy-paste, so this is not only about deliberate evasion.
+ZERO_WIDTH = dict.fromkeys(
+    map(ord, "​‌‍‎‏⁠﻿­⁦⁧⁨⁩"),
+    None,
+)
 
 
 def _fold(text: str, tags: str | None = " ") -> str:
@@ -77,10 +91,7 @@ def marker_present(body: str) -> bool:
     `<[^>]*>` reduces it to the empty string, and an empty needle matches every
     body - including an empty one. That blocked every legitimate PR.
     """
-    if MARKER in body:
-        return True
-    needle = _fold(MARKER, tags=None)
-    return bool(needle) and needle in _fold(body, tags=None)
+    return bool(MARKER_RE.search(_fold(body, tags=None)))
 
 
 def labels() -> list[str]:
