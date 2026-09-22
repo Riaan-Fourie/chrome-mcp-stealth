@@ -362,6 +362,45 @@ async function humanType(page, text) {
   }
 }
 
+// What chrome_type was asked to type must be what the field ends up holding.
+// On 2026-09-20 a LinkedIn message went out cut off mid-word ("...just shout if
+// th") because nothing compared the two before Send (Jarvis #521). The compare
+// ignores whitespace shape (a line break may land as <br>, a div or a space) and
+// the invisible characters rich editors insert, but not a single missing letter.
+function normaliseForCompare(s) {
+  return String(s ?? "")
+    .replace(/[​‌‍﻿]/g, "")
+    .replace(/ /g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function typedTextLanded(fieldText, typedText) {
+  const want = normaliseForCompare(typedText);
+  if (!want) return true;
+  return normaliseForCompare(fieldText).includes(want);
+}
+
+function isSendSelector(selector) {
+  return /send/i.test(selector || "");
+}
+
+// The field chrome_type last typed into, so a later Send click can be checked
+// against it. Cleared once a send click goes through.
+let lastTyped = null;
+
+async function readFieldText(handle) {
+  try {
+    return await handle.evaluate((el) => {
+      if (!el || !el.isConnected || el === document.body || el === document.documentElement) return null;
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") return el.value;
+      return el.innerText;
+    });
+  } catch {
+    return null; // detached or navigated away
+  }
+}
+
 async function applyStealthPatches(page) {
   if (stealthPatchedPages.has(page)) return;
   await page.evaluate(() => {
@@ -575,8 +614,16 @@ async function handleTool(name, args) {
     }
     case "chrome_click": {
       const domainCheck = checkDomain(currentPage.url());
+      const isSend = isSendSelector(args.selector);
+      if (isSend && lastTyped) {
+        const fieldText = await readFieldText(lastTyped.field);
+        if (fieldText === null || !typedTextLanded(fieldText, lastTyped.text)) {
+          return `BLOCKED: send refused. The field no longer holds the full text that was typed.\nExpected: "${lastTyped.text}"\nField:    "${fieldText ?? "(field gone)"}"\nClear the field with the keyboard and type the message again.`;
+        }
+      }
       if (isStealth) await humanClick(currentPage, args.selector);
       else { await currentPage.click(args.selector, { timeout: 5000 }); }
+      if (isSend) lastTyped = null;
       let result = `Clicked: ${args.selector}\nURL: ${currentPage.url()}\nMode: ${currentMode}`;
       if (domainCheck.sensitive) result += `\n!! SENSITIVE DOMAIN: ${domainCheck.domain}`;
       return result;
@@ -586,7 +633,6 @@ async function handleTool(name, args) {
       if (isStealth) {
         if (args.selector) await humanClick(currentPage, args.selector);
         await humanType(currentPage, args.text);
-        if (args.pressEnter) { await sleep(gaussianDelay(300, 100, 150, 600)); await currentPage.keyboard.press("Enter"); await sleep(gaussianDelay(1000, 300, 500, 2000)); }
       } else {
         if (args.selector) {
           await currentPage.fill(args.selector, args.text);
@@ -594,9 +640,21 @@ async function handleTool(name, args) {
           // No selector — type into whatever is focused, but use instant delay
           await currentPage.keyboard.type(args.text, { delay: 0 });
         }
-        if (args.pressEnter) { await currentPage.keyboard.press("Enter"); }
       }
-      return `Typed: "${args.text.slice(0, 50)}${args.text.length > 50 ? "..." : ""}"${args.pressEnter ? " + Enter" : ""}\nMode: ${currentMode}`;
+      // Verify before any Enter: on chat UIs Enter sends (Jarvis #521).
+      const field = (args.selector && !isStealth ? await currentPage.$(args.selector) : null)
+        ?? await currentPage.evaluateHandle(() => document.activeElement);
+      const fieldText = await readFieldText(field);
+      const landed = fieldText !== null && typedTextLanded(fieldText, args.text);
+      lastTyped = { field, text: args.text };
+      if (!landed) {
+        return `TYPE MISMATCH: the field does not hold the full text${args.pressEnter ? ", so Enter was NOT pressed" : ""}. Do not send.\nExpected: "${args.text}"\nField:    "${fieldText ?? "(no focused field)"}"\nMode: ${currentMode}`;
+      }
+      if (args.pressEnter) {
+        if (isStealth) { await sleep(gaussianDelay(300, 100, 150, 600)); await currentPage.keyboard.press("Enter"); await sleep(gaussianDelay(1000, 300, 500, 2000)); }
+        else { await currentPage.keyboard.press("Enter"); }
+      }
+      return `Typed: "${args.text.slice(0, 50)}${args.text.length > 50 ? "..." : ""}"${args.pressEnter ? " + Enter" : ""}\nVerified: the field holds the full text.\nMode: ${currentMode}`;
     }
     case "chrome_tabs": {
       const pages = defaultContext.pages();
@@ -730,6 +788,9 @@ export {
   stripLiteralsAndComments,
   keystrokeFor,
   humanType,
+  normaliseForCompare,
+  typedTextLanded,
+  isSendSelector,
   gaussian,
   gaussianDelay,
   cubicBezier,
