@@ -403,6 +403,28 @@ async function applyStealthPatches(page) {
 // CONNECTION
 // ============================================================
 
+// #844: open tabs in the background so Chrome never steals focus on macOS.
+// Playwright's context.newPage() sends Target.createTarget without
+// `background: true`, which activates Chrome and switches Spaces. A raw CDP
+// createTarget with background:true opens the tab behind the active one;
+// Playwright still picks it up as a page, and goto/click/screenshot all work.
+async function openBackgroundTab() {
+  const session = await browser.newBrowserCDPSession();
+  try {
+    const pagePromise = defaultContext.waitForEvent("page", { timeout: 10000 });
+    await session.send("Target.createTarget", { url: "about:blank", background: true });
+    return await pagePromise;
+  } finally {
+    await session.detach().catch(() => {});
+  }
+}
+
+// #844: stealth-only domains (LinkedIn) keep coming to the front. A background
+// tab reports document.visibilityState = "hidden", which is a bot signal there.
+async function frontIfStealthDomain(page, url) {
+  if (isForcedStealth(url)) await page.bringToFront();
+}
+
 async function ensureConnected() {
   if (browser?.isConnected()) return;
   browser = null; defaultContext = null; currentPage = null;
@@ -412,7 +434,7 @@ async function ensureConnected() {
   defaultContext = contexts[0];
   // Always create a new tab so multiple MCP server instances
   // sharing the same Chrome don't fight over the same page.
-  currentPage = await defaultContext.newPage();
+  currentPage = await openBackgroundTab();
 }
 
 async function forceReconnect() {
@@ -540,10 +562,12 @@ async function handleTool(name, args) {
       } else if (!isForcedStealth(args.url) && currentMode === "stealth" && isForcedStealth(currentPage.url())) {
         currentMode = "fast";
       }
+      await frontIfStealthDomain(currentPage, args.url);
       await currentPage.goto(args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
       // LAYER 4: Post-redirect stealth detection — check the ACTUAL URL after
       // load, not just the requested URL. Catches redirects to LinkedIn.
       const actualUrl = currentPage.url();
+      await frontIfStealthDomain(currentPage, actualUrl);
       if (isForcedStealth(actualUrl) && currentMode !== "stealth") {
         currentMode = "stealth";
       }
@@ -605,7 +629,8 @@ async function handleTool(name, args) {
         case "select":
           if (args.index >= 0 && args.index < pages.length) {
             currentPage = pages[args.index];
-            await currentPage.bringToFront();
+            // #844: no bringToFront here, it steals focus. LinkedIn only.
+            await frontIfStealthDomain(currentPage, currentPage.url());
             // LAYER 5: Enforce stealth when switching to a LinkedIn tab
             if (isForcedStealth(currentPage.url())) { currentMode = "stealth"; }
             if (currentMode === "stealth") await applyStealthPatches(currentPage);
@@ -616,13 +641,15 @@ async function handleTool(name, args) {
           return "Invalid tab index";
         case "new": {
           if (args.url) { const dc = checkDomain(args.url); if (dc.blocked) return `BLOCKED: ${dc.domain}`; }
-          const newPage = await defaultContext.newPage();
+          const newPage = await openBackgroundTab();
           if (args.url) {
             // LAYER 5b: Enforce stealth before navigating new tab to LinkedIn
             if (isForcedStealth(args.url)) currentMode = "stealth";
+            await frontIfStealthDomain(newPage, args.url);
             await newPage.goto(args.url, { waitUntil: "domcontentloaded", timeout: 30000 });
             // Post-redirect check on new tab too
             if (isForcedStealth(newPage.url())) currentMode = "stealth";
+            await frontIfStealthDomain(newPage, newPage.url());
           }
           currentPage = newPage;
           if (currentMode === "stealth") await applyStealthPatches(currentPage);
