@@ -78,6 +78,17 @@ Additionally, all output is scanned for credential patterns (API keys, tokens, J
    }
    ```
 
+## One server for every session (HTTP)
+
+`node index.js --http 3140` serves the same tools at `http://127.0.0.1:3140/mcp` to every Claude session at
+once, instead of one stdio process per session. The Chrome connection is shared; each session keeps its own
+tab and its own mode. Loopback only; requests from web pages are refused. See
+[ADR 0001](docs/adr/0001-one-server-for-every-session-over-http.md).
+
+```json
+{ "chrome-stealth": { "type": "http", "url": "http://127.0.0.1:3140/mcp" } }
+```
+
 ## Stealth-Only Domains
 
 LinkedIn (`linkedin.com`, `www.linkedin.com`) enforces stealth mode — fast mode is blocked. This is enforced at 5 layers: navigation, mode switch, every interaction, post-redirect, and tab switch.
