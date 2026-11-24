@@ -18,8 +18,14 @@ async function cdpUp() {
 
 async function connect(port) {
   const client = new Client({ name: "test", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+  await client.connect(transport);
+  client.end = async () => { await transport.terminateSession().catch(() => {}); await client.close(); };
   return client;
+}
+
+async function chromeTitles() {
+  return (await (await fetch(`${CDP}/json/list`)).json()).map((t) => t.title);
 }
 
 const text = (result) => result.content.map((c) => c.text).join("\n");
@@ -126,4 +132,23 @@ describe("over HTTP, on a real port", () => {
       }
     }
   });
+  // Needs Chrome on CDP. Two sessions whose first calls race must still get
+  // two tabs, and ending a session closes the tab it opened.
+  test("sessions that start at the same moment get a tab each, closed when they end", async (t) => {
+    if (!(await cdpUp())) return t.skip("Chrome CDP is not running");
+    const clients = await Promise.all([1, 2, 3].map(() => connect(port)));
+    try {
+      await Promise.all(clients.map((c, i) =>
+        c.callTool({ name: "chrome_navigate", arguments: { url: `data:text/html,<title>race-${i}-922</title>` } })));
+      for (const [i, c] of clients.entries()) {
+        assert.match(text(await c.callTool({ name: "chrome_page_info", arguments: {} })), new RegExp(`Title: race-${i}-922`));
+      }
+      assert.equal((await chromeTitles()).filter((x) => /race-\d-922/.test(x)).length, 3);
+    } finally {
+      for (const c of clients) await c.end();
+    }
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal((await chromeTitles()).filter((x) => /race-\d-922/.test(x)).length, 0);
+  });
 });
+

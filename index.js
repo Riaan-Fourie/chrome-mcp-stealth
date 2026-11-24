@@ -28,7 +28,7 @@ let connecting = null; // one connect at a time, however many sessions ask
 // the session. Each MCP server instance binds its session state around
 // every tool call, so a tool only ever sees its own session's tab.
 // ============================================================
-function newSession() { return { page: null, mode: "fast", gen: -1 }; }
+function newSession() { return { page: null, mode: "fast", gen: -1, ownsPage: false }; }
 const sessionStore = new AsyncLocalStorage();
 const stdioSession = newSession();
 function S() { return sessionStore.getStore() ?? stdioSession; }
@@ -424,12 +424,38 @@ async function applyStealthPatches(page) {
 // `background: true`, which activates Chrome and switches Spaces. A raw CDP
 // createTarget with background:true opens the tab behind the active one;
 // Playwright still picks it up as a page, and goto/click/screenshot all work.
-async function openBackgroundTab() {
+// Jarvis #922: sessions share one Chrome, so two can open a tab at the same
+// moment, and another session's page can open a popup. Tabs are opened one at
+// a time, and the new page is the one whose CDP target id createTarget
+// returned, never just the next page to appear.
+let tabQueue = Promise.resolve();
+function openBackgroundTab() {
+  const opened = tabQueue.then(openBackgroundTabNow, openBackgroundTabNow);
+  tabQueue = opened.catch(() => {});
+  return opened;
+}
+
+async function targetIdOf(page) {
+  const cdp = await defaultContext.newCDPSession(page);
+  try { return (await cdp.send("Target.getTargetInfo")).targetInfo.targetId; }
+  finally { await cdp.detach().catch(() => {}); }
+}
+
+async function openBackgroundTabNow() {
   const session = await browser.newBrowserCDPSession();
   try {
-    const pagePromise = defaultContext.waitForEvent("page", { timeout: 10000 });
-    await session.send("Target.createTarget", { url: "about:blank", background: true });
-    return await pagePromise;
+    const checked = new Set(defaultContext.pages());
+    const { targetId } = await session.send("Target.createTarget", { url: "about:blank", background: true });
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      for (const page of defaultContext.pages()) {
+        if (checked.has(page)) continue;
+        checked.add(page);
+        if ((await targetIdOf(page).catch(() => null)) === targetId) return page;
+      }
+      await sleep(25);
+    }
+    throw new Error("The new tab never appeared in Chrome");
   } finally {
     await session.detach().catch(() => {});
   }
@@ -461,6 +487,7 @@ async function ensureConnected() {
   if (!s.page || s.gen !== browserGen || s.page.isClosed()) {
     s.page = await openBackgroundTab();
     s.gen = browserGen;
+    s.ownsPage = true;
   }
 }
 
@@ -659,6 +686,7 @@ async function handleTool(name, args) {
         case "select":
           if (args.index >= 0 && args.index < pages.length) {
             S().page = pages[args.index];
+            S().ownsPage = false; // selected, not opened: never closed with the session
             // #844: no bringToFront here, it steals focus. LinkedIn only.
             await frontIfStealthDomain(S().page, S().page.url());
             // LAYER 5: Enforce stealth when switching to a LinkedIn tab
@@ -682,6 +710,7 @@ async function handleTool(name, args) {
             await frontIfStealthDomain(newPage, newPage.url());
           }
           S().page = newPage;
+          S().ownsPage = true;
           if (S().mode === "stealth") await applyStealthPatches(S().page);
           let newMsg = `Opened new tab: ${S().page.url()}\nMode: ${S().mode}`;
           if (isForcedStealth(S().page.url())) newMsg += `\n!! STEALTH ENFORCED`;
@@ -848,7 +877,7 @@ function createHttpApp(port, sessions = new Map()) {
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => { sessions.set(id, { transport, session, lastSeen: Date.now() }); },
       });
-      transport.onclose = () => { if (transport.sessionId) sessions.delete(transport.sessionId); };
+      transport.onclose = () => { if (transport.sessionId) sessions.delete(transport.sessionId); closeSessionTab(session); };
       await createMcpServer(session).connect(transport);
       await transport.handleRequest(req, res, body);
     } catch (error) {
@@ -857,9 +886,21 @@ function createHttpApp(port, sessions = new Map()) {
   };
 }
 
+// A session's tab goes with it, so tabs do not pile up in Chrome as sessions
+// come and go. A tab the session selected rather than opened is not closed.
+function closeSessionTab(session) {
+  const page = session.page;
+  session.page = null;
+  if (page && session.ownsPage && !page.isClosed()) page.close().catch(() => {});
+}
+
 function sweepIdleSessions(sessions, now = Date.now()) {
   for (const [id, entry] of sessions) {
-    if (now - entry.lastSeen > SESSION_IDLE_MS) { sessions.delete(id); entry.transport.close().catch(() => {}); }
+    if (now - entry.lastSeen > SESSION_IDLE_MS) {
+      sessions.delete(id);
+      closeSessionTab(entry.session ?? {});
+      entry.transport.close().catch(() => {});
+    }
   }
 }
 
